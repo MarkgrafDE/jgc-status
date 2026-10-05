@@ -25,6 +25,42 @@
     { key: '90d', label: '90 Tage' },
   ];
 
+  const PERIOD_LS_KEY = 'jgc-status.uptimePeriod';
+  const PERIOD_DAYS = { '24h': 1, '7d': 7, '30d': 30, '90d': 90 };
+  const PERIOD_LABEL_LEFT = {
+    '24h': 'vor 24 Std',
+    '7d': 'vor 7 Tagen',
+    '30d': 'vor 30 Tagen',
+    '90d': 'vor 90 Tagen',
+  };
+
+  function loadPeriodMap() {
+    try {
+      const raw = localStorage.getItem(PERIOD_LS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function getMonitorPeriod(monitorId) {
+    const key = loadPeriodMap()[monitorId];
+    return UPTIME_KEYS.some((u) => u.key === key) ? key : '90d';
+  }
+
+  function setMonitorPeriod(monitorId, key) {
+    if (!UPTIME_KEYS.some((u) => u.key === key)) return;
+    const map = loadPeriodMap();
+    map[monitorId] = key;
+    try {
+      localStorage.setItem(PERIOD_LS_KEY, JSON.stringify(map));
+    } catch {
+      /* ignore quota / private mode */
+    }
+  }
+
+
   const BOT_STATUS_DE = {
     online: 'Bot online',
     idle: 'Bot abwesend',
@@ -114,6 +150,20 @@
       }).format(date);
     } catch {
       return date.toISOString().slice(0, 10);
+    }
+  }
+
+  function berlinHourLabel(date) {
+    try {
+      return new Intl.DateTimeFormat('de-DE', {
+        timeZone: 'Europe/Berlin',
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(date);
+    } catch {
+      return date.toISOString();
     }
   }
 
@@ -379,66 +429,140 @@
     return wrap;
   }
 
-  function buildDayBars(dayBars) {
+  function emptyDayPad(key) {
+    return { d: key, pct: null, up: 0, down: 0, maint: 0, avgMs: null };
+  }
+
+  function padDailyBars(dayBars, count) {
     const map = new Map((dayBars || []).map((d) => [d.d, d]));
     const padded = [];
     const now = new Date();
-    for (let i = 89; i >= 0; i--) {
+    for (let i = count - 1; i >= 0; i--) {
       const dt = new Date(now.getTime() - i * 86400000);
       const key = berlinDayKey(dt);
-      const hit = map.get(key);
-      padded.push(
-        hit || {
-          d: key,
-          pct: null,
-          up: 0,
-          down: 0,
-          avgMs: null,
-        },
-      );
+      padded.push(map.get(key) || emptyDayPad(key));
+    }
+    return padded;
+  }
+
+  function buildHourlyBars(samples) {
+    const now = Date.now();
+    const buckets = [];
+    for (let i = 23; i >= 0; i--) {
+      const end = now - i * 3600000;
+      const start = end - 3600000;
+      let up = 0;
+      let down = 0;
+      let maint = 0;
+      let sumMs = 0;
+      let nMs = 0;
+      for (const s of samples || []) {
+        if (s.t < start || s.t >= end) continue;
+        const derived = s.derived || null;
+        if (derived === 'stopped' || derived === 'restart') {
+          maint += 1;
+          continue;
+        }
+        if (s.up === true) {
+          up += 1;
+          if (typeof s.ms === 'number' && Number.isFinite(s.ms)) {
+            sumMs += s.ms;
+            nMs += 1;
+          }
+        } else if (s.up === false) {
+          down += 1;
+        }
+      }
+      const relevant = up + down;
+      buckets.push({
+        d: null,
+        kind: 'hour',
+        tStart: start,
+        tEnd: end,
+        up,
+        down,
+        maint,
+        pct: relevant > 0 ? (up / relevant) * 100 : null,
+        avgMs: nMs > 0 ? sumMs / nMs : null,
+      });
+    }
+    return buckets;
+  }
+
+  function barTooltipHtml(d) {
+    const downtimeMin = Math.round((d.down || 0) * 5);
+    const maintMin = Math.round((d.maint || 0) * 5);
+    const statusLabel =
+      d.pct == null && !(d.maint > 0)
+        ? 'Keine Daten'
+        : (d.maint || 0) > 0 && (d.down || 0) === 0 && (d.up || 0) === 0
+          ? 'Wartung'
+          : d.pct == null
+            ? 'Wartung / keine Uptime-Daten'
+            : d.pct >= 99
+              ? 'Betriebsbereit'
+              : d.pct >= 95
+                ? 'Störung'
+                : 'Ausfall';
+    const title =
+      d.kind === 'hour'
+        ? `${berlinHourLabel(new Date(d.tStart))} – ${fmtTimeShort(d.tEnd)}`
+        : fmtDayDe(d.d);
+    return (
+      `<strong>${title}</strong>` +
+      `Uptime: ${fmtPct(d.pct)}<br>` +
+      `Status: ${statusLabel}` +
+      (d.down
+        ? `<br>Ausfall ≈ ${downtimeMin} Min (${d.down} Checks)`
+        : d.pct != null
+          ? '<br>Kein Ausfall'
+          : '') +
+      (d.maint ? `<br>Wartung ≈ ${maintMin} Min (${d.maint} Checks)` : '') +
+      (d.avgMs != null ? `<br>Ø Antwort: ${fmtMs(d.avgMs)}` : '')
+    );
+  }
+
+  function buildDayBars(dayBars, opts) {
+    opts = opts || {};
+    const period = opts.period || '90d';
+    const samples = opts.samples || [];
+
+    let padded;
+    let aria;
+    let leftLabel;
+    let dense = false;
+
+    if (period === '24h') {
+      const hasSamples = (samples || []).some((s) => typeof s.t === 'number');
+      if (hasSamples) {
+        padded = buildHourlyBars(samples);
+        aria = 'Uptime der letzten 24 Stunden (stündlich)';
+        leftLabel = PERIOD_LABEL_LEFT['24h'];
+        dense = true;
+      } else {
+        padded = padDailyBars(dayBars, 1);
+        aria = 'Uptime des letzten Tages';
+        leftLabel = 'Heute';
+      }
+    } else {
+      const count = PERIOD_DAYS[period] || 90;
+      padded = padDailyBars(dayBars, count);
+      aria = `Uptime der letzten ${count} Tage`;
+      leftLabel = PERIOD_LABEL_LEFT[period] || PERIOD_LABEL_LEFT['90d'];
     }
 
     const wrap = document.createElement('div');
     wrap.className = 'bars-wrap';
+    wrap.dataset.period = period;
 
     const bars = document.createElement('div');
-    bars.className = 'bars';
-    bars.setAttribute('aria-label', '90-Tage-Uptime');
+    bars.className = 'bars' + (dense ? ' bars--dense' : '');
+    bars.setAttribute('aria-label', aria);
 
     for (const d of padded) {
       const el = document.createElement('div');
       el.className = `bar ${barClass(d)}`;
-      const downtimeMin = Math.round((d.down || 0) * 5);
-      const maintMin = Math.round((d.maint || 0) * 5);
-      const statusLabel =
-        d.pct == null && !(d.maint > 0)
-          ? 'Keine Daten'
-          : (d.maint || 0) > 0 && (d.down || 0) === 0 && (d.up || 0) === 0
-            ? 'Wartung'
-            : d.pct == null
-              ? 'Wartung / keine Uptime-Daten'
-              : d.pct >= 99
-                ? 'Betriebsbereit'
-                : d.pct >= 95
-                  ? 'Störung'
-                  : 'Ausfall';
-      el.addEventListener('mouseenter', (e) => {
-        showTip(
-          e,
-          `<strong>${fmtDayDe(d.d)}</strong>` +
-            `Uptime: ${fmtPct(d.pct)}<br>` +
-            `Status: ${statusLabel}` +
-            (d.down
-              ? `<br>Ausfall ≈ ${downtimeMin} Min (${d.down} Checks)`
-              : d.pct != null
-                ? '<br>Kein Ausfall'
-                : '') +
-            (d.maint
-              ? `<br>Wartung ≈ ${maintMin} Min (${d.maint} Checks)`
-              : '') +
-            (d.avgMs != null ? `<br>Ø Antwort: ${fmtMs(d.avgMs)}` : ''),
-        );
-      });
+      el.addEventListener('mouseenter', (e) => showTip(e, barTooltipHtml(d)));
       el.addEventListener('mousemove', moveTip);
       el.addEventListener('mouseleave', hideTip);
       bars.appendChild(el);
@@ -447,7 +571,8 @@
 
     const labels = document.createElement('div');
     labels.className = 'bars-labels';
-    labels.innerHTML = '<span>vor 90 Tagen</span><span>Heute</span>';
+    const rightLabel = period === '24h' && dense ? 'jetzt' : 'Heute';
+    labels.innerHTML = `<span>${leftLabel}</span><span>${rightLabel}</span>`;
     wrap.appendChild(labels);
 
     const legend = document.createElement('div');
@@ -582,17 +707,64 @@
     card.appendChild(head);
 
     const uptime = (detail && detail.meta && detail.meta.uptime) || mon.uptime || {};
+    const selectedPeriod = getMonitorPeriod(mon.id);
     const tabs = document.createElement('div');
     tabs.className = 'uptime-tabs';
+    tabs.setAttribute('role', 'group');
+    tabs.setAttribute('aria-label', 'Uptime-Zeitraum');
+
+    const barsHost = document.createElement('div');
+    barsHost.className = 'bars-host';
+
+    function paintBars(period) {
+      const next = buildDayBars(detail?.dayBars, {
+        period,
+        samples: detail?.samples || [],
+      });
+      barsHost.replaceChildren(next);
+    }
+
+    function selectPeriod(period) {
+      setMonitorPeriod(mon.id, period);
+      for (const btn of tabs.querySelectorAll('.uptime-tab')) {
+        const on = btn.dataset.period === period;
+        btn.classList.toggle('is-focus', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+      paintBars(period);
+      // Samples only cover ~24h — filter chart for 24h; leave it for longer windows
+      if (period === '24h') {
+        const chartMount = card.querySelector('.response__chart');
+        if (chartMount) {
+          const allSamples = detail?.samples || [];
+          const chartSamples = allSamples.filter((s) => s.t >= Date.now() - 24 * 3600000);
+          chartMount.replaceChildren(
+            sparklineSvg(chartSamples, {
+              status: mon.status || 'unknown',
+              derived: mon.derived || null,
+              currentMs: typeof mon.ms === 'number' ? mon.ms : null,
+            }),
+          );
+        }
+      }
+    }
+
     for (const u of UPTIME_KEYS) {
-      const btn = document.createElement('div');
-      btn.className = 'uptime-tab' + (u.key === '90d' ? ' is-focus' : '');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'uptime-tab' + (u.key === selectedPeriod ? ' is-focus' : '');
+      btn.dataset.period = u.key;
+      btn.setAttribute('role', 'button');
+      btn.setAttribute('aria-pressed', u.key === selectedPeriod ? 'true' : 'false');
+      btn.setAttribute('aria-label', `Uptime ${u.label}: ${fmtPct(uptime[u.key])}`);
       btn.innerHTML = `${u.label}<strong>${fmtPct(uptime[u.key])}</strong>`;
+      btn.addEventListener('click', () => selectPeriod(u.key));
       tabs.appendChild(btn);
     }
     card.appendChild(tabs);
 
-    card.appendChild(buildDayBars(detail?.dayBars));
+    paintBars(selectedPeriod);
+    card.appendChild(barsHost);
 
     const response = document.createElement('div');
     response.className = 'response';

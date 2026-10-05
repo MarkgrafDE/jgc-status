@@ -183,15 +183,20 @@ body { position: relative; overflow-x: hidden; }
   margin-bottom: 0.95rem;
 }
 .uptime-tab {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
   color: var(--muted);
   border-radius: 10px;
   padding: 0.5rem 0.55rem;
   font-size: 0.72rem;
-  cursor: default;
+  cursor: pointer;
   text-align: center;
   line-height: 1.25;
+  width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 .uptime-tab strong {
   display: block;
@@ -200,11 +205,32 @@ body { position: relative; overflow-x: hidden; }
   margin-top: 0.15rem;
   font-weight: 700;
 }
+.uptime-tab:hover {
+  border-color: rgba(0, 210, 255, 0.35);
+  color: #d7f6ff;
+  background: rgba(0, 210, 255, 0.05);
+}
+.uptime-tab:focus {
+  outline: none;
+}
+.uptime-tab:focus-visible {
+  outline: 2px solid rgba(0, 210, 255, 0.85);
+  outline-offset: 2px;
+  border-color: rgba(244, 8, 255, 0.45);
+}
 .uptime-tab.is-focus {
   border-color: rgba(0, 210, 255, 0.45);
   box-shadow: inset 0 0 0 1px rgba(244, 8, 255, 0.15), 0 0 16px rgba(0, 210, 255, 0.08);
   color: #cfefff;
+  background: rgba(244, 8, 255, 0.06);
 }
+.uptime-tab.is-focus:hover {
+  border-color: rgba(0, 210, 255, 0.6);
+}
+.bars--dense {
+  gap: 2px;
+}
+.bars-host { min-width: 0; }
 
 .bars-wrap { margin-bottom: 0.85rem; }
 .bars {
