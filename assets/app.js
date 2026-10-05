@@ -118,13 +118,15 @@
   }
 
   function barClass(d) {
-    if (!d || (d.pct == null && !(d.maint > 0))) return 'bar--empty';
-    // Day dominated by maintenance
-    const checks = (d.up || 0) + (d.down || 0) + (d.maint || 0);
-    if (checks && (d.maint || 0) >= (d.up || 0) + (d.down || 0) && (d.down || 0) === 0) {
-      return 'bar--maint';
-    }
-    if (d.pct == null) return d.maint ? 'bar--maint' : 'bar--empty';
+    if (!d) return 'bar--empty';
+    const up = d.up || 0;
+    const down = d.down || 0;
+    const maint = d.maint || 0;
+    if (up + down + maint === 0) return 'bar--empty';
+    // No real downtime → never red. Pure/mostly maintenance → gray.
+    if (down === 0 && maint > 0 && up === 0) return 'bar--maint';
+    if (down === 0 && d.pct == null && maint > 0) return 'bar--maint';
+    if (d.pct == null) return maint ? 'bar--maint' : 'bar--empty';
     if (d.pct >= 99) return 'bar--ok';
     if (d.pct >= 95) return 'bar--warn';
     return 'bar--bad';
@@ -149,32 +151,65 @@
     tip.style.top = `${Math.max(8, y)}px`;
   }
 
-  function sparklineSvg(samples) {
-    const pts = (samples || [])
-      .filter((s) => s.up && typeof s.ms === 'number' && Number.isFinite(s.ms))
-      .map((s) => ({ t: s.t, ms: s.ms }));
+  function sparklineSvg(samples, opts) {
+    opts = opts || {};
+    const derived = opts.derived || null;
+    const status = opts.status || null;
 
-    if (pts.length < 2) {
+    if (status === 'stopped' || derived === 'stopped') {
       const el = document.createElement('div');
       el.className = 'spark-empty';
-      el.textContent = 'Noch zu wenig Messwerte';
+      el.textContent = 'Server gestoppt – keine Messwerte';
+      return el;
+    }
+    if (status === 'restart' || derived === 'restart') {
+      const el = document.createElement('div');
+      el.className = 'spark-empty';
+      el.textContent = 'Neustart – keine Messwerte';
+      return el;
+    }
+
+    const pts = (samples || [])
+      .filter((s) => s.up === true && typeof s.ms === 'number' && Number.isFinite(s.ms) && s.ms >= 0 && s.ms < 60000)
+      .map((s) => ({ t: s.t, ms: s.ms }));
+
+    if (pts.length < 3) {
+      const el = document.createElement('div');
+      el.className = 'spark-empty';
+      const cur = opts.currentMs != null ? ` · jetzt ${Math.round(opts.currentMs)} ms` : '';
+      el.textContent = 'Noch zu wenig Messwerte' + cur;
       return el;
     }
 
     const id = `sg${++sparkId}`;
     const w = 320;
-    const h = 48;
-    const padY = 4;
-    const min = Math.min(...pts.map((p) => p.ms));
-    const max = Math.max(...pts.map((p) => p.ms));
+    const h = 56;
+    const padL = 36;
+    const padR = 8;
+    const padT = 10;
+    const padB = 16;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+
+    let min = Math.min(...pts.map((p) => p.ms));
+    let max = Math.max(...pts.map((p) => p.ms));
+    if (max - min < 20) {
+      const mid = (max + min) / 2;
+      min = Math.max(0, mid - 15);
+      max = mid + 15;
+    } else {
+      const pad = (max - min) * 0.15;
+      min = Math.max(0, min - pad);
+      max = max + pad;
+    }
     const span = Math.max(1, max - min);
     const t0 = pts[0].t;
     const t1 = pts[pts.length - 1].t;
     const tSpan = Math.max(1, t1 - t0);
 
     const coords = pts.map((p) => {
-      const x = ((p.t - t0) / tSpan) * w;
-      const y = h - padY - ((p.ms - min) / span) * (h - padY * 2);
+      const x = padL + ((p.t - t0) / tSpan) * plotW;
+      const y = padT + (1 - (p.ms - min) / span) * plotH;
       return [x, y];
     });
 
@@ -182,9 +217,16 @@
       .map((c, i) => `${i ? 'L' : 'M'}${c[0].toFixed(2)},${c[1].toFixed(2)}`)
       .join(' ');
     const area =
-      `M0,${h} ` +
+      `M${coords[0][0].toFixed(2)},${(padT + plotH).toFixed(2)} ` +
       coords.map((c) => `L${c[0].toFixed(2)},${c[1].toFixed(2)}`).join(' ') +
-      ` L${w},${h} Z`;
+      ` L${coords[coords.length - 1][0].toFixed(2)},${(padT + plotH).toFixed(2)} Z`;
+
+    const dots = coords
+      .map(
+        (c) =>
+          `<circle cx="${c[0].toFixed(2)}" cy="${c[1].toFixed(2)}" r="2.2" fill="#00D2FF" stroke="#0b0b12" stroke-width="1"/>`,
+      )
+      .join('');
 
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'spark');
@@ -198,13 +240,18 @@
           <stop offset="100%" stop-color="#00D2FF"/>
         </linearGradient>
         <linearGradient id="${id}-fill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#00D2FF" stop-opacity="0.28"/>
+          <stop offset="0%" stop-color="#00D2FF" stop-opacity="0.25"/>
           <stop offset="100%" stop-color="#F408FF" stop-opacity="0.02"/>
         </linearGradient>
       </defs>
+      <text x="${padL - 4}" y="${padT + 3}" text-anchor="end" fill="#9a9ab0" font-size="8">${Math.round(max)} ms</text>
+      <text x="${padL - 4}" y="${padT + plotH}" text-anchor="end" fill="#9a9ab0" font-size="8">${Math.round(min)} ms</text>
+      <text x="${padL}" y="${h - 2}" fill="#9a9ab0" font-size="8">vor 24 Std</text>
+      <text x="${w - padR}" y="${h - 2}" text-anchor="end" fill="#9a9ab0" font-size="8">jetzt</text>
       <path d="${area}" fill="url(#${id}-fill)" stroke="none"/>
-      <path d="${line}" fill="none" stroke="url(#${id}-stroke)" stroke-width="2.2"
-            stroke-linejoin="round" stroke-linecap="round"/>`;
+      <path d="${line}" fill="none" stroke="url(#${id}-stroke)" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots}`;
     return svg;
   }
 
@@ -292,18 +339,27 @@
     return wrap;
   }
 
-  function buildMeta(mon, detail, status) {
+  function buildMeta(mon, detail, status, derived) {
     const meta = document.createElement('div');
     meta.className = 'meta';
     const extra = mon.extra || detail?.meta?.extra || {};
     const chips = [];
 
-    if (mon.kind === 'a2s' || mon.id === 'gameserver') {
+    if (mon.kind === 'a2s' || mon.id === 'gameserver' || mon.id === 'testserver') {
       if (extra.players != null) {
         chips.push(`Spieler <strong>${extra.players}/${extra.max ?? '?'}</strong>`);
       }
       if (extra.map) chips.push(`Map <strong>${escapeHtml(String(extra.map))}</strong>`);
-      if (extra.name) chips.push(`<strong>${escapeHtml(String(extra.name).slice(0, 48))}</strong>`);
+      if (extra.name) {
+        const nm = String(extra.name).trim();
+        const generic =
+          !nm ||
+          /^new\s+gmod\s+server$/i.test(nm) ||
+          /^garry'?s\s*mod$/i.test(nm) ||
+          /^gmod$/i.test(nm) ||
+          /^server$/i.test(nm);
+        if (!generic) chips.push(`Name: <strong>${escapeHtml(nm.slice(0, 48))}</strong>`);
+      }
     } else if (mon.kind === 'http') {
       if (extra.status != null) chips.push(`HTTP <strong>${escapeHtml(String(extra.status))}</strong>`);
     } else if (mon.kind === 'discord-widget') {
@@ -325,29 +381,39 @@
 
     // Links as pill buttons
     const links = [];
-    if (mon.id === 'gameserver') {
+    if (mon.kind === 'a2s' || mon.id === 'gameserver' || mon.id === 'testserver') {
+      const href =
+        mon.link ||
+        (mon.id === 'testserver'
+          ? 'https://markgrafde.github.io/jgc-connect/?ip=159.195.60.189:27016'
+          : 'https://markgrafde.github.io/jgc-connect/?ip=159.195.60.189:27015');
+      const playable = status === 'up' || derived === 'online';
       links.push({
-        href: 'https://markgrafde.github.io/jgc-connect/',
+        href,
         label: 'Verbinden',
         primary: true,
+        disabled: !playable,
       });
-    }
-    if (mon.link && mon.id !== 'gameserver') {
-      links.push({ href: mon.link, label: 'Öffnen', primary: mon.kind === 'http' });
-    } else if (mon.link && mon.id === 'gameserver') {
-      // already have Verbinden; skip duplicate Öffnen to connect page
     } else if (mon.link) {
-      links.push({ href: mon.link, label: 'Öffnen', primary: false });
+      links.push({ href: mon.link, label: 'Öffnen', primary: mon.kind === 'http' });
     }
 
     for (const l of links) {
-      const a = document.createElement('a');
-      a.href = l.href;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      a.className = 'btn-pill' + (l.primary ? '' : ' btn-pill--ghost');
-      a.textContent = l.label;
-      meta.appendChild(a);
+      if (l.disabled) {
+        const span = document.createElement('span');
+        span.className = 'btn-pill btn-pill--disabled';
+        span.textContent = l.label;
+        span.title = 'Server nicht erreichbar';
+        meta.appendChild(span);
+      } else {
+        const a = document.createElement('a');
+        a.href = l.href;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.className = 'btn-pill' + (l.primary ? '' : ' btn-pill--ghost');
+        a.textContent = l.label;
+        meta.appendChild(a);
+      }
     }
 
     return meta;
@@ -411,11 +477,17 @@
 
     const chart = document.createElement('div');
     chart.className = 'response__chart';
-    chart.appendChild(sparklineSvg(detail?.samples || []));
+    chart.appendChild(
+      sparklineSvg(detail?.samples || [], {
+        status,
+        derived,
+        currentMs: typeof mon.ms === 'number' ? mon.ms : null,
+      }),
+    );
     response.appendChild(chart);
     card.appendChild(response);
 
-    card.appendChild(buildMeta(mon, detail, status));
+    card.appendChild(buildMeta(mon, detail, status, derived));
     return card;
   }
 
@@ -437,6 +509,19 @@
       el.appendChild(label);
     }
     label.textContent = summary.overallLabel || 'Status unbekannt';
+    let sub = el.querySelector('.overall__sub');
+    if (summary.overallSubline) {
+      if (!sub) {
+        sub = document.createElement('span');
+        sub.className = 'overall__sub';
+        el.appendChild(sub);
+      }
+      sub.textContent = summary.overallSubline;
+      sub.hidden = false;
+    } else if (sub) {
+      sub.hidden = true;
+      sub.textContent = '';
+    }
   }
 
   function renderLastChecked(ts) {

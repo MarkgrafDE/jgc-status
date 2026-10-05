@@ -429,3 +429,8 @@ body { position: relative; overflow-x: hidden; }
   .overall { font-size: 1rem; }
   .site-header { padding-top: 1.35rem; }
 }
+
+.btn-pill--disabled{opacity:.45;cursor:not-allowed;background:#2a2a3a;color:#9a9ab0;box-shadow:none;}
+
+.overall__sub{display:block;width:100%;margin:.35rem 0 0 1.55rem;font-size:.85rem;font-weight:500;color:var(--muted);}
+.overall{flex-wrap:wrap;}

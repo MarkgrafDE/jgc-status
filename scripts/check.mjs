@@ -45,6 +45,8 @@ const MONITORS = [
     icon: '🧪',
     link: 'https://markgrafde.github.io/jgc-connect/?ip=159.195.60.189:27016',
     pteroEnv: 'PTERO_GAME_SERVER_ID',
+    /** Secondary: Wartung hier beeinträchtigt das Global-Banner nicht */
+    critical: false,
   },
   {
     id: 'website',
@@ -469,8 +471,58 @@ async function sendAlert(webhookUrl, { monitor, from, to, derived, cause, extra,
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+
+/** One-time style repair: reclassify false downtime as maintenance (esp. Testserver). */
+function backfillMaintenanceSamples() {
+  for (const mon of MONITORS) {
+    const file = path.join(DATA, `${mon.id}.json`);
+    const data = loadJson(file, null);
+    if (!data || !Array.isArray(data.samples)) continue;
+    let changed = false;
+    for (const s of data.samples) {
+      // Explicit stopped/restart already null; convert false downs that were crashed/stopped era
+      if (s.up === false) {
+        const d = s.derived;
+        if (d === 'stopped' || d === 'restart' || d === 'crashed' || mon.critical === false) {
+          // For secondary monitors: any historical failure while we know it's often stopped -> maint
+          // Also reclassify crashed samples on secondary as maint (intentional stop mislabeled)
+          if (mon.critical === false || d === 'stopped' || d === 'restart') {
+            s.up = null;
+            if (!s.derived || d === 'crashed') s.derived = 'stopped';
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed && !(mon.critical === false)) continue;
+
+    // Rebuild days from samples (Berlin day key)
+    const byDay = new Map();
+    for (const s of data.samples) {
+      const d = dayKey(s.t);
+      if (!byDay.has(d)) byDay.set(d, { d, up: 0, down: 0, maint: 0, sumMs: 0, nMs: 0 });
+      const e = byDay.get(d);
+      if (s.up === true) {
+        e.up += 1;
+        if (typeof s.ms === 'number' && Number.isFinite(s.ms)) {
+          e.sumMs += s.ms;
+          e.nMs += 1;
+        }
+      } else if (s.up === false) e.down += 1;
+      else e.maint += 1;
+    }
+    data.days = pruneDays([...byDay.values()]);
+    // dayBars refreshed later in main loop; still write samples/days now
+    if (changed || mon.critical === false) {
+      // force rewrite days even if only secondary
+      saveJson(file, data);
+    }
+  }
+}
+
 async function main() {
   fs.mkdirSync(DATA, { recursive: true });
+  backfillMaintenanceSamples();
   const now = Date.now();
   const today = dayKey(now);
   const webhookUrl = (process.env.DISCORD_WEBHOOK_URL || '').trim();
@@ -707,6 +759,7 @@ async function main() {
       icon: mon.icon,
       kind: mon.kind,
       link: mon.link || null,
+      critical: mon.critical !== false,
       status: confirmed,
       derived: confirmedDerived,
       cause,
@@ -729,30 +782,40 @@ async function main() {
     );
   }
 
-  const countable = results.filter((r) => r.status !== 'unknown');
-  const downCount = countable.filter((r) => r.status === 'down').length;
-  const maintCount = countable.filter((r) => r.status === 'restart' || r.status === 'stopped').length;
-  const upCount = countable.filter((r) => r.status === 'up').length;
+  // Critical monitors drive the global banner; secondary (e.g. Testserver) only as subline.
+  const monById = Object.fromEntries(MONITORS.map((m) => [m.id, m]));
+  const isCritical = (r) => monById[r.id]?.critical !== false;
+  const primary = results.filter((r) => r.status !== 'unknown' && isCritical(r));
+  const secondary = results.filter((r) => r.status !== 'unknown' && !isCritical(r));
+  const primaryDown = primary.filter((r) => r.status === 'down');
+  const primaryMaint = primary.filter((r) => r.status === 'restart' || r.status === 'stopped');
+  const primaryUp = primary.filter((r) => r.status === 'up');
+  const secondaryNotes = secondary
+    .filter((r) => r.status === 'stopped' || r.status === 'restart' || r.status === 'down')
+    .map((r) => {
+      const meta = STATE_META[r.derived] || STATE_META.unknown;
+      return `${meta.emoji} ${r.name.replace(/^Gameserver\s+/,'')}: ${meta.label}`;
+    });
+
   let overall = 'ok';
   let overallLabel = 'Alle Systeme betriebsbereit';
-  if (downCount === 0 && maintCount === 0 && upCount > 0) {
+  if (primaryDown.length === 0 && primaryMaint.length === 0 && primaryUp.length > 0) {
     overall = 'ok';
     overallLabel = 'Alle Systeme betriebsbereit';
-  } else if (downCount === 0 && maintCount > 0) {
+  } else if (primaryDown.length === 0 && primaryMaint.length > 0) {
     overall = 'partial';
-    overallLabel = maintCount && results.some((r) => r.derived === 'restart')
-      ? 'Neustart / Wartung'
-      : 'Wartung';
-  } else if (downCount > 0 && (upCount > 0 || maintCount > 0)) {
+    overallLabel = primaryMaint.some((r) => r.derived === 'restart') ? 'Neustart / Wartung' : 'Wartung';
+  } else if (primaryDown.length > 0 && primaryUp.length + primaryMaint.length > 0) {
     overall = 'partial';
     overallLabel = 'Teilweise Störung';
-  } else if (downCount > 0 && upCount === 0) {
+  } else if (primaryDown.length > 0) {
     overall = 'down';
     overallLabel = 'Störung';
   } else {
     overall = 'unknown';
     overallLabel = 'Status unbekannt';
   }
+  const overallSubline = secondaryNotes.length ? secondaryNotes.join(' · ') : null;
 
   state.incidents = state.incidents.slice(0, 50);
   const incidentsPublic = state.incidents.slice(0, 10).map((i) => ({
@@ -772,10 +835,11 @@ async function main() {
     updatedAt: now,
     overall,
     overallLabel,
+    overallSubline,
     monitors: results,
     incidents: incidentsPublic,
     note:
-      'GitHub Actions Cron ist best-effort (manchmal 5–15 Min Verspätung). Gestoppt/Neustart zählen als Wartung, nicht als Downtime. Crash-Heuristik: running→offline ohne stopping.',
+      'Messungen alle ~5 Min (Box-Cron interim; später GitHub Actions). Gestoppt/Neustart = Wartung (kein Downtime-%). Secondary-Monitore (Testserver) färben das Banner nicht orange. Crash-Heuristik: running→offline ohne stopping. Box-Cron deaktivieren, sobald der GH-Workflow live ist.',
   };
   saveJson(path.join(DATA, 'summary.json'), summary);
   saveJson(STATE_FILE, state);
