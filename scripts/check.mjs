@@ -483,12 +483,11 @@ function backfillMaintenanceSamples() {
       // Explicit stopped/restart already null; convert false downs that were crashed/stopped era
       if (s.up === false) {
         const d = s.derived;
-        if (d === 'stopped' || d === 'restart' || d === 'crashed' || mon.critical === false) {
-          // For secondary monitors: any historical failure while we know it's often stopped -> maint
-          // Also reclassify crashed samples on secondary as maint (intentional stop mislabeled)
-          if (mon.critical === false || d === 'stopped' || d === 'restart') {
+        // Old bug: ptero offline was labeled crashed. Offline/stop is Wartung, never crash.
+        if (d === 'crashed' || d === 'stopped' || d === 'restart' || mon.critical === false) {
+          if (d === 'crashed' || mon.critical === false || d === 'stopped' || d === 'restart') {
             s.up = null;
-            if (!s.derived || d === 'crashed') s.derived = 'stopped';
+            s.derived = d === 'restart' ? 'restart' : 'stopped';
             changed = true;
           }
         }
@@ -567,10 +566,23 @@ async function main() {
       power: pteroPower,
       probeOk: probeUnknown ? false : probeOk,
       prevPower: prev.pteroPower || null,
+      prevDerived: prev.derived || null,
     });
+    // Hard rule: Ptero offline is always maintenance (stopped), never crash
+    if (pteroPower === 'offline') {
+      derived = 'stopped';
+    }
     // Widget-unknown + no ptero → keep previous
     if (probeUnknown && pteroPower === 'unknown') {
       derived = prev.derived && prev.derived !== 'unknown' ? prev.derived : 'unknown';
+    }
+    // Sticky: last known Wartung + still offline/unknown panel + probe fail → stay stopped/restart
+    if (
+      (prev.derived === 'stopped' || prev.derived === 'restart') &&
+      (pteroPower === 'offline' || pteroPower === 'unknown') &&
+      !probeOk
+    ) {
+      derived = pteroPower === 'offline' ? 'stopped' : prev.derived;
     }
 
     // Confirmation: only for disconnected (running but probe fail). Maintenance immediate.
@@ -632,16 +644,21 @@ async function main() {
         cause,
         derived: confirmedDerived,
       });
-    } else if (becameUp) {
+    } else if (becameUp || isMaintenanceState(confirmedDerived)) {
+      // Resolve open downtime when back online OR entering Wartung (e.g. false crash → stopped)
       const open = state.incidents.find((i) => i.monitorId === mon.id && i.status === 'ongoing');
-      if (open) {
+      if (open && (becameUp || isDowntimeState(oldDerived))) {
         open.end = now;
         open.status = 'resolved';
         open.durationMs = open.end - open.start;
         open.duration = formatDurationDe(open.durationMs);
+        if (isMaintenanceState(confirmedDerived)) {
+          open.resolvedAs = confirmedDerived;
+        }
       }
     }
 
+    // No Discord on first observation (oldDerived === unknown)
     if (becameDown || becameUp) {
       await sendAlert(webhookUrl, {
         monitor: mon,
@@ -653,8 +670,8 @@ async function main() {
         error: raw.error,
       });
       console.log(`[alert] ${mon.id}: ${oldDerived} → ${confirmedDerived}`);
-    } else if (becameMaint) {
-      // Info only, no alarm
+    } else if (becameMaint && confirmedDerived === 'restart') {
+      // Neustart: info only. Gestoppt/Wartung: silent (no spam when someone stops a server).
       await sendAlert(webhookUrl, {
         monitor: mon,
         from: oldStatus,
@@ -666,6 +683,8 @@ async function main() {
         infoOnly: true,
       });
       console.log(`[info] ${mon.id}: ${oldDerived} → ${confirmedDerived}`);
+    } else if (becameMaint && confirmedDerived === 'stopped') {
+      console.log(`[info] ${mon.id}: ${oldDerived} → stopped (no alert)`);
     }
 
     prev.status = confirmed;

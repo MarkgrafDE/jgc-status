@@ -20,17 +20,23 @@ export function normalizePower(raw) {
 /**
  * @returns {'online'|'restart'|'stopped'|'disconnected'|'crashed'|'unknown'}
  */
-export function deriveServiceState({ power, probeOk, prevPower }) {
+export function deriveServiceState({ power, probeOk, prevPower, prevDerived }) {
   // Neustart nur wenn Panel start/stop meldet UND Probe noch fehlschlägt.
   if (power === 'starting' || power === 'stopping') {
     return probeOk ? 'online' : 'restart';
   }
+  // Panel "offline" = gestoppt/Wartung — NIEMALS crashed (auch nicht nach running).
+  // Crash ohne Stop-Übergang ist am Panel nicht zuverlässig von "Stop" unterscheidbar;
+  // echte Störungen: power=running + Probe fail → disconnected.
   if (power === 'offline') {
-    if (prevPower === 'running') return 'crashed';
     return 'stopped';
   }
   if (power === 'running') return probeOk ? 'online' : 'disconnected';
-  return probeOk ? 'online' : 'disconnected';
+  // power unknown
+  if (probeOk) return 'online';
+  // Sticky maintenance if we already knew stopped/restart and panel is unreachable
+  if (prevDerived === 'stopped' || prevDerived === 'restart') return prevDerived;
+  return 'disconnected';
 }
 
 export function isDowntimeState(state) {
