@@ -151,108 +151,232 @@
     tip.style.top = `${Math.max(8, y)}px`;
   }
 
+  function fmtTimeShort(ts) {
+    try {
+      return new Intl.DateTimeFormat('de-DE', {
+        timeZone: 'Europe/Berlin',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(ts));
+    } catch {
+      return '';
+    }
+  }
+
+  function smoothPath(coords) {
+    if (coords.length < 2) return '';
+    if (coords.length === 2) {
+      return `M${coords[0][0].toFixed(2)},${coords[0][1].toFixed(2)} L${coords[1][0].toFixed(2)},${coords[1][1].toFixed(2)}`;
+    }
+    // Catmull-Rom → cubic Bezier with clamped control points (no overshoot on uneven gaps)
+    let d = `M${coords[0][0].toFixed(2)},${coords[0][1].toFixed(2)}`;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const p0 = coords[i === 0 ? 0 : i - 1];
+      const p1 = coords[i];
+      const p2 = coords[i + 1];
+      const p3 = coords[i + 2] || p2;
+      const dx = p2[0] - p1[0];
+      if (dx < 0.5) {
+        d += ` L${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+        continue;
+      }
+      let cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+      let cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+      let cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+      let cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+      cp1x = Math.max(p1[0], Math.min(p2[0], cp1x));
+      cp2x = Math.max(p1[0], Math.min(p2[0], cp2x));
+      const lo = Math.min(p1[1], p2[1]);
+      const hi = Math.max(p1[1], p2[1]);
+      const ypad = Math.max(4, (hi - lo) * 0.35);
+      cp1y = Math.max(lo - ypad, Math.min(hi + ypad, cp1y));
+      cp2y = Math.max(lo - ypad, Math.min(hi + ypad, cp2y));
+      d += ` C${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+    }
+    return d;
+  }
+
   function sparklineSvg(samples, opts) {
     opts = opts || {};
     const derived = opts.derived || null;
     const status = opts.status || null;
 
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-chart';
+
     if (status === 'stopped' || derived === 'stopped') {
-      const el = document.createElement('div');
-      el.className = 'spark-empty';
-      el.textContent = 'Server gestoppt – keine Messwerte';
-      return el;
+      wrap.className = 'spark-empty';
+      wrap.textContent = 'Server gestoppt – keine Messwerte';
+      return wrap;
     }
     if (status === 'restart' || derived === 'restart') {
-      const el = document.createElement('div');
-      el.className = 'spark-empty';
-      el.textContent = 'Neustart – keine Messwerte';
-      return el;
+      wrap.className = 'spark-empty';
+      wrap.textContent = 'Neustart – keine Messwerte';
+      return wrap;
     }
 
-    const pts = (samples || [])
-      .filter((s) => s.up === true && typeof s.ms === 'number' && Number.isFinite(s.ms) && s.ms >= 0 && s.ms < 60000)
-      .map((s) => ({ t: s.t, ms: s.ms }));
+    const raw = (samples || [])
+      .filter(
+        (s) =>
+          s.up === true &&
+          typeof s.ms === 'number' &&
+          Number.isFinite(s.ms) &&
+          s.ms >= 0 &&
+          s.ms < 60000,
+      )
+      .map((s) => ({ t: s.t, ms: s.ms }))
+      .sort((a, b) => a.t - b.t);
+    // Collapse near-duplicate timestamps (keep last) so x never stacks
+    const pts = [];
+    for (const p of raw) {
+      if (pts.length && Math.abs(p.t - pts[pts.length - 1].t) < 5000) {
+        pts[pts.length - 1] = p;
+      } else {
+        pts.push(p);
+      }
+    }
 
     if (pts.length < 3) {
-      const el = document.createElement('div');
-      el.className = 'spark-empty';
+      wrap.className = 'spark-empty';
       const cur = opts.currentMs != null ? ` · jetzt ${Math.round(opts.currentMs)} ms` : '';
-      el.textContent = 'Noch zu wenig Messwerte' + cur;
-      return el;
+      wrap.textContent = 'Noch zu wenig Messwerte' + cur;
+      return wrap;
     }
 
-    const id = `sg${++sparkId}`;
-    const w = 320;
-    const h = 56;
-    const padL = 36;
-    const padR = 8;
-    const padT = 10;
-    const padB = 16;
-    const plotW = w - padL - padR;
-    const plotH = h - padT - padB;
-
-    let min = Math.min(...pts.map((p) => p.ms));
-    let max = Math.max(...pts.map((p) => p.ms));
-    if (max - min < 20) {
-      const mid = (max + min) / 2;
-      min = Math.max(0, mid - 15);
-      max = mid + 15;
-    } else {
-      const pad = (max - min) * 0.15;
-      min = Math.max(0, min - pad);
-      max = max + pad;
-    }
-    const span = Math.max(1, max - min);
+    let yMin = Math.min(...pts.map((p) => p.ms));
+    let yMax = Math.max(...pts.map((p) => p.ms));
+    const rawSpan = Math.max(1, yMax - yMin);
+    const pad = Math.max(20, rawSpan * 0.2);
+    yMin = Math.max(0, yMin - pad);
+    yMax = yMax + pad;
+    const ySpan = Math.max(1, yMax - yMin);
     const t0 = pts[0].t;
     const t1 = pts[pts.length - 1].t;
     const tSpan = Math.max(1, t1 - t0);
 
-    const coords = pts.map((p) => {
-      const x = padL + ((p.t - t0) / tSpan) * plotW;
-      const y = padT + (1 - (p.ms - min) / span) * plotH;
-      return [x, y];
+    const id = `sg${++sparkId}`;
+
+    wrap.innerHTML = `
+      <div class="rt-chart__y rt-chart__y--max"></div>
+      <div class="rt-chart__plot">
+        <svg class="rt-chart__svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="rt-chart__hover" hidden></div>
+      </div>
+      <div class="rt-chart__y rt-chart__y--min"></div>
+      <div class="rt-chart__x">
+        <span>vor 24 Std</span>
+        <span>jetzt</span>
+      </div>`;
+
+    const yMaxEl = wrap.querySelector('.rt-chart__y--max');
+    const yMinEl = wrap.querySelector('.rt-chart__y--min');
+    const plotEl = wrap.querySelector('.rt-chart__plot');
+    const svg = wrap.querySelector('.rt-chart__svg');
+    const hoverEl = wrap.querySelector('.rt-chart__hover');
+    yMaxEl.textContent = `${Math.round(yMax)} ms`;
+    yMinEl.textContent = `${Math.round(yMin)} ms`;
+
+    let lastCoords = [];
+
+    function draw() {
+      const w = Math.max(120, Math.floor(plotEl.clientWidth || 300));
+      const h = Math.max(100, Math.floor(plotEl.clientHeight || 120));
+      const padT = 8;
+      const padB = 8;
+      const padL = 2;
+      const padR = 2;
+      const innerW = w - padL - padR;
+      const innerH = h - padT - padB;
+
+      svg.setAttribute('width', String(w));
+      svg.setAttribute('height', String(h));
+      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      // 1 SVG unit = 1 CSS px — never stretch
+      svg.setAttribute('preserveAspectRatio', 'xMinYMid meet');
+      svg.style.width = w + 'px';
+      svg.style.height = h + 'px';
+
+      const coords = pts.map((p) => {
+        const x = padL + ((p.t - t0) / tSpan) * innerW;
+        const y = padT + (1 - (p.ms - yMin) / ySpan) * innerH;
+        return [x, y, p];
+      });
+      lastCoords = coords;
+
+      const lineD = smoothPath(coords.map((c) => [c[0], c[1]]));
+      let area = `M${coords[0][0].toFixed(2)},${(padT + innerH).toFixed(2)} `;
+      for (const c of coords) area += `L${c[0].toFixed(2)},${c[1].toFixed(2)} `;
+      area += `L${coords[coords.length - 1][0].toFixed(2)},${(padT + innerH).toFixed(2)} Z`;
+
+      const gridYs = [0.25, 0.5, 0.75]
+        .map((f) => padT + f * innerH)
+        .map(
+          (y) =>
+            `<line x1="${padL}" y1="${y.toFixed(2)}" x2="${(w - padR).toFixed(2)}" y2="${y.toFixed(2)}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`,
+        )
+        .join('');
+
+      const last = coords[coords.length - 1];
+
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="${id}-stroke" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#F408FF"/>
+            <stop offset="100%" stop-color="#00D2FF"/>
+          </linearGradient>
+          <linearGradient id="${id}-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#00D2FF" stop-opacity="0.28"/>
+            <stop offset="100%" stop-color="#F408FF" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        ${gridYs}
+        <path d="${area}" fill="url(#${id}-fill)" stroke="none"/>
+        <path d="${lineD}" fill="none" stroke="url(#${id}-stroke)" stroke-width="2.4"
+              stroke-linejoin="round" stroke-linecap="round"
+              vector-effect="non-scaling-stroke"/>
+        <circle cx="${last[0].toFixed(2)}" cy="${last[1].toFixed(2)}" r="4.2"
+                fill="#00D2FF" stroke="#0b0b12" stroke-width="2"/>
+      `;
+    }
+
+    function nearest(mx) {
+      if (!lastCoords.length) return null;
+      let best = lastCoords[0];
+      let bestDist = Infinity;
+      for (const c of lastCoords) {
+        const d = Math.abs(c[0] - mx);
+        if (d < bestDist) {
+          bestDist = d;
+          best = c;
+        }
+      }
+      return best;
+    }
+
+    plotEl.addEventListener('mousemove', (e) => {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width) return;
+      const scaleX = (svg.viewBox.baseVal.width || rect.width) / rect.width;
+      const mx = (e.clientX - rect.left) * scaleX;
+      const hit = nearest(mx);
+      if (!hit) return;
+      const p = hit[2];
+      hoverEl.hidden = false;
+      hoverEl.textContent = `${fmtTimeShort(p.t)} · ${Math.round(p.ms)} ms`;
+      const left = Math.min(plotEl.clientWidth - 110, Math.max(0, hit[0] - 40));
+      hoverEl.style.left = `${left}px`;
+      hoverEl.style.top = `${Math.max(0, hit[1] - 28)}px`;
+    });
+    plotEl.addEventListener('mouseleave', () => {
+      hoverEl.hidden = true;
     });
 
-    const line = coords
-      .map((c, i) => `${i ? 'L' : 'M'}${c[0].toFixed(2)},${c[1].toFixed(2)}`)
-      .join(' ');
-    const area =
-      `M${coords[0][0].toFixed(2)},${(padT + plotH).toFixed(2)} ` +
-      coords.map((c) => `L${c[0].toFixed(2)},${c[1].toFixed(2)}`).join(' ') +
-      ` L${coords[coords.length - 1][0].toFixed(2)},${(padT + plotH).toFixed(2)} Z`;
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(plotEl);
+    // initial draw after layout
+    requestAnimationFrame(() => draw());
 
-    const dots = coords
-      .map(
-        (c) =>
-          `<circle cx="${c[0].toFixed(2)}" cy="${c[1].toFixed(2)}" r="2.2" fill="#00D2FF" stroke="#0b0b12" stroke-width="1"/>`,
-      )
-      .join('');
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'spark');
-    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-    svg.setAttribute('preserveAspectRatio', 'none');
-    svg.setAttribute('aria-hidden', 'true');
-    svg.innerHTML = `
-      <defs>
-        <linearGradient id="${id}-stroke" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stop-color="#F408FF"/>
-          <stop offset="100%" stop-color="#00D2FF"/>
-        </linearGradient>
-        <linearGradient id="${id}-fill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#00D2FF" stop-opacity="0.25"/>
-          <stop offset="100%" stop-color="#F408FF" stop-opacity="0.02"/>
-        </linearGradient>
-      </defs>
-      <text x="${padL - 4}" y="${padT + 3}" text-anchor="end" fill="#9a9ab0" font-size="8">${Math.round(max)} ms</text>
-      <text x="${padL - 4}" y="${padT + plotH}" text-anchor="end" fill="#9a9ab0" font-size="8">${Math.round(min)} ms</text>
-      <text x="${padL}" y="${h - 2}" fill="#9a9ab0" font-size="8">vor 24 Std</text>
-      <text x="${w - padR}" y="${h - 2}" text-anchor="end" fill="#9a9ab0" font-size="8">jetzt</text>
-      <path d="${area}" fill="url(#${id}-fill)" stroke="none"/>
-      <path d="${line}" fill="none" stroke="url(#${id}-stroke)" stroke-width="2"
-            stroke-linejoin="round" stroke-linecap="round"/>
-      ${dots}`;
-    return svg;
+    return wrap;
   }
 
   function buildDayBars(dayBars) {
@@ -358,7 +482,13 @@
           /^garry'?s\s*mod$/i.test(nm) ||
           /^gmod$/i.test(nm) ||
           /^server$/i.test(nm);
-        if (!generic) chips.push(`Name: <strong>${escapeHtml(nm.slice(0, 48))}</strong>`);
+        if (!generic) {
+          chips.push({
+            html: `Name: <strong>${escapeHtml(nm)}</strong>`,
+            title: nm,
+            cls: 'chip chip--name',
+          });
+        }
       }
     } else if (mon.kind === 'http') {
       if (extra.status != null) chips.push(`HTTP <strong>${escapeHtml(String(extra.status))}</strong>`);
@@ -372,10 +502,16 @@
       chips.push(`Fehler: ${escapeHtml(mon.error)}`);
     }
 
-    for (const html of chips) {
+    for (const item of chips) {
       const span = document.createElement('span');
-      span.className = 'chip';
-      span.innerHTML = html;
+      if (typeof item === 'string') {
+        span.className = 'chip';
+        span.innerHTML = item;
+      } else {
+        span.className = item.cls || 'chip';
+        span.innerHTML = item.html;
+        if (item.title) span.title = item.title;
+      }
       meta.appendChild(span);
     }
 
