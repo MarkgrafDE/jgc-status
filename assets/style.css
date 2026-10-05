@@ -173,6 +173,8 @@ body { position: relative; overflow-x: hidden; }
 .pill--up { color: #bbf7d0; background: rgba(34, 197, 94, 0.14); border-color: rgba(34, 197, 94, 0.35); }
 .pill--down { color: #fecaca; background: rgba(239, 68, 68, 0.14); border-color: rgba(239, 68, 68, 0.4); }
 .pill--unknown { color: #e5e5ef; background: rgba(154, 154, 176, 0.14); border-color: rgba(154, 154, 176, 0.35); }
+.pill--restart { color: #fde68a; background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.45); }
+.pill--stopped { color: #d1d5db; background: rgba(107, 114, 128, 0.2); border-color: rgba(156, 163, 175, 0.4); }
 
 .uptime-tabs {
   display: grid;
@@ -224,6 +226,7 @@ body { position: relative; overflow-x: hidden; }
 .bar--warn { background: var(--orange); opacity: 0.95; }
 .bar--bad { background: var(--red); opacity: 0.95; }
 .bar--empty { background: #2a2a3a; opacity: 0.45; }
+.bar--maint { background: #6b7280; opacity: 0.85; }
 .bar:hover {
   transform: translateY(-1px) scaleY(1.04);
   opacity: 1;
@@ -258,6 +261,7 @@ body { position: relative; overflow-x: hidden; }
 .leg-warn { background: var(--orange); }
 .leg-bad { background: var(--red); }
 .leg-empty { background: #2a2a3a; }
+.leg-maint { background: #6b7280; }
 
 .response {
   display: grid;

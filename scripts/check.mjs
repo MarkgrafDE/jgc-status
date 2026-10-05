@@ -7,6 +7,13 @@ import dgram from 'node:dgram';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  deriveServiceState,
+  fetchPteroPowerState,
+  isDowntimeState,
+  isMaintenanceState,
+  STATE_META,
+} from './ptero.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -27,6 +34,7 @@ const MONITORS = [
     port: 27016,
     icon: '🎮',
     link: 'https://markgrafde.github.io/jgc-connect/',
+    pteroEnv: 'PTERO_GAME_SERVER_ID',
   },
   {
     id: 'website',
@@ -53,6 +61,7 @@ const MONITORS = [
     botUsername: 'JGC | Alpha',
     icon: '🤖',
     link: 'https://discord.com/invite/sEqkkGnF',
+    pteroEnv: 'PTERO_BOT_SERVER_ID',
   },
 ];
 
@@ -338,18 +347,21 @@ function emptyMonitorData(mon) {
   };
 }
 
-function upsertDay(days, d, up, ms) {
+function upsertDay(days, d, kind, ms) {
+  // kind: 'up' | 'down' | 'maint'
   let entry = days.find((x) => x.d === d);
   if (!entry) {
-    entry = { d, up: 0, down: 0, sumMs: 0, nMs: 0 };
+    entry = { d, up: 0, down: 0, maint: 0, sumMs: 0, nMs: 0 };
     days.push(entry);
   }
-  if (up) {
+  if (kind === 'up') {
     entry.up += 1;
     if (typeof ms === 'number' && Number.isFinite(ms)) {
       entry.sumMs += ms;
       entry.nMs += 1;
     }
+  } else if (kind === 'maint') {
+    entry.maint = (entry.maint || 0) + 1;
   } else {
     entry.down += 1;
   }
@@ -400,17 +412,27 @@ function formatDurationDe(ms) {
 
 // ─── Discord alert ───────────────────────────────────────────────────────────
 
-async function sendAlert(webhookUrl, { monitor, from, to, extra, error }) {
+async function sendAlert(webhookUrl, { monitor, from, to, derived, cause, extra, error, infoOnly }) {
   if (!webhookUrl) return;
-  const isDown = to === 'down';
-  const color = isDown ? 0xf408ff : 0x00d2ff;
-  const title = isDown ? `🔴 ${monitor.name} offline` : `🟢 ${monitor.name} wieder online`;
+  const meta = STATE_META[derived] || STATE_META.unknown;
+  let color = 0x00d2ff;
+  let title;
+  if (infoOnly) {
+    color = derived === 'restart' ? 0xf59e0b : 0x6b7280;
+    title = `${meta.emoji} ${monitor.name}: ${meta.label}`;
+  } else if (to === 'down') {
+    color = 0xf408ff;
+    title = `${meta.emoji} ${monitor.name}: ${meta.label}`;
+  } else {
+    color = 0x00d2ff;
+    title = `🟢 ${monitor.name} wieder online`;
+  }
   const fields = [];
+  if (cause) fields.push({ name: 'Ursache', value: String(cause), inline: true });
   if (error) fields.push({ name: 'Details', value: String(error).slice(0, 200), inline: false });
   if (extra?.map) fields.push({ name: 'Map', value: String(extra.map), inline: true });
   if (extra?.players != null)
     fields.push({ name: 'Spieler', value: `${extra.players}/${extra.max ?? '?'}`, inline: true });
-  if (extra?.status) fields.push({ name: 'Presence', value: String(extra.status), inline: true });
   const body = {
     username: 'JGC Status',
     embeds: [
@@ -442,6 +464,8 @@ async function main() {
   const now = Date.now();
   const today = dayKey(now);
   const webhookUrl = (process.env.DISCORD_WEBHOOK_URL || '').trim();
+  const pteroUrl = (process.env.PTERO_URL || '').trim();
+  const pteroKey = (process.env.PTERO_CLIENT_KEY || '').trim();
   const state = loadJson(STATE_FILE, { monitors: {}, incidents: [] });
   if (!state.monitors) state.monitors = {};
   if (!Array.isArray(state.incidents)) state.incidents = [];
@@ -452,41 +476,90 @@ async function main() {
     const raw = await runCheck(mon);
     const prev = state.monitors[mon.id] || {
       status: 'unknown',
+      derived: 'unknown',
       failCount: 0,
+      pteroPower: null,
       lastUp: null,
       lastDown: null,
     };
 
-    // unknown (widget missing bot) → keep previous confirmed status, don't alert
-    let confirmed;
-    if (raw.up === null || raw.unknown) {
-      confirmed = prev.status === 'unknown' ? 'unknown' : prev.status;
-      // don't increment failCount
-    } else if (raw.up) {
-      prev.failCount = 0;
-      confirmed = 'up';
-    } else {
-      prev.failCount = (prev.failCount || 0) + 1;
-      // First observation: if never seen up, mark down immediately (gameserver stopped on purpose)
-      if (prev.status === 'unknown' || prev.status === 'down') {
-        confirmed = 'down';
-      } else if (prev.failCount >= FAIL_CONFIRM) {
-        confirmed = 'down';
-      } else {
-        confirmed = 'up'; // still considered up until confirmed
+    // Optional Pterodactyl power state (gameserver / bot)
+    let pteroPower = 'unknown';
+    let pteroSource = 'none';
+    const pteroId = mon.pteroEnv ? (process.env[mon.pteroEnv] || '').trim() : '';
+    if (pteroUrl && pteroKey && pteroId) {
+      try {
+        const p = await fetchPteroPowerState(pteroUrl, pteroKey, pteroId);
+        if (p.ok) {
+          pteroPower = p.power;
+          pteroSource = p.source;
+        }
+      } catch {
+        /* Panel down → Probe-only */
       }
     }
 
-    const oldStatus = prev.status;
-    const transition =
-      (oldStatus === 'up' || oldStatus === 'unknown') && confirmed === 'down'
-        ? 'down'
-        : oldStatus === 'down' && confirmed === 'up'
-          ? 'up'
-          : null;
+    const probeOk = raw.up === true;
+    const probeUnknown = raw.up === null || raw.unknown;
+    let derived = deriveServiceState({
+      power: pteroPower,
+      probeOk: probeUnknown ? false : probeOk,
+      prevPower: prev.pteroPower || null,
+    });
+    // Widget-unknown + no ptero → keep previous
+    if (probeUnknown && pteroPower === 'unknown') {
+      derived = prev.derived && prev.derived !== 'unknown' ? prev.derived : 'unknown';
+    }
 
-    // Incidents
-    if (transition === 'down') {
+    // Confirmation: only for disconnected (running but probe fail). Maintenance immediate.
+    let confirmedDerived = derived;
+    if (derived === 'disconnected') {
+      prev.failCount = (prev.failCount || 0) + 1;
+      if (prev.derived === 'disconnected' || prev.status === 'down' || prev.failCount >= FAIL_CONFIRM) {
+        confirmedDerived = 'disconnected';
+      } else if (prev.derived === 'online' || prev.status === 'up') {
+        // still treat as online until 2 fails
+        confirmedDerived = 'online';
+      }
+    } else if (derived === 'online') {
+      prev.failCount = 0;
+      confirmedDerived = 'online';
+    } else {
+      prev.failCount = 0;
+      confirmedDerived = derived;
+    }
+
+    // Map to status badge bucket
+    let confirmed;
+    if (confirmedDerived === 'online') confirmed = 'up';
+    else if (confirmedDerived === 'restart') confirmed = 'restart';
+    else if (confirmedDerived === 'stopped') confirmed = 'stopped';
+    else if (confirmedDerived === 'unknown') confirmed = 'unknown';
+    else confirmed = 'down'; // disconnected | crashed
+
+    const cause =
+      confirmedDerived === 'disconnected'
+        ? 'Verbindung getrennt'
+        : confirmedDerived === 'crashed'
+          ? 'Abgestürzt'
+          : confirmedDerived === 'restart'
+            ? 'Neustart'
+            : confirmedDerived === 'stopped'
+              ? 'Gestoppt'
+              : null;
+
+    const oldStatus = prev.status;
+    const oldDerived = prev.derived || 'unknown';
+    const becameDown =
+      isDowntimeState(confirmedDerived) && !isDowntimeState(oldDerived) && oldDerived !== 'unknown';
+    const becameUp = confirmedDerived === 'online' && oldDerived !== 'online' && isDowntimeState(oldDerived);
+    const becameMaint =
+      isMaintenanceState(confirmedDerived) &&
+      oldDerived !== confirmedDerived &&
+      oldDerived !== 'unknown';
+
+    // Incidents only for real downtime
+    if (becameDown) {
       state.incidents.unshift({
         id: `${mon.id}-${now}`,
         monitorId: mon.id,
@@ -494,11 +567,11 @@ async function main() {
         start: now,
         end: null,
         status: 'ongoing',
+        cause,
+        derived: confirmedDerived,
       });
-    } else if (transition === 'up') {
-      const open = state.incidents.find(
-        (i) => i.monitorId === mon.id && i.status === 'ongoing',
-      );
+    } else if (becameUp) {
+      const open = state.incidents.find((i) => i.monitorId === mon.id && i.status === 'ongoing');
       if (open) {
         open.end = now;
         open.status = 'resolved';
@@ -507,29 +580,47 @@ async function main() {
       }
     }
 
-    if (transition) {
+    if (becameDown || becameUp) {
       await sendAlert(webhookUrl, {
         monitor: mon,
         from: oldStatus,
         to: confirmed,
+        derived: confirmedDerived,
+        cause,
         extra: raw.extra,
         error: raw.error,
       });
-      console.log(`[alert] ${mon.id}: ${oldStatus} → ${confirmed}`);
+      console.log(`[alert] ${mon.id}: ${oldDerived} → ${confirmedDerived}`);
+    } else if (becameMaint) {
+      // Info only, no alarm
+      await sendAlert(webhookUrl, {
+        monitor: mon,
+        from: oldStatus,
+        to: confirmed,
+        derived: confirmedDerived,
+        cause,
+        extra: raw.extra,
+        error: null,
+        infoOnly: true,
+      });
+      console.log(`[info] ${mon.id}: ${oldDerived} → ${confirmedDerived}`);
     }
 
     prev.status = confirmed;
-    prev.failCount = confirmed === 'up' ? 0 : prev.failCount;
+    prev.derived = confirmedDerived;
+    prev.cause = cause;
+    prev.pteroPower = pteroPower !== 'unknown' ? pteroPower : prev.pteroPower;
+    prev.pteroSource = pteroSource;
+    prev.failCount = confirmedDerived === 'online' ? 0 : prev.failCount;
     prev.lastCheck = now;
     prev.lastResult = raw.up;
     if (confirmed === 'up') prev.lastUp = now;
     if (confirmed === 'down') prev.lastDown = now;
     prev.extra = raw.extra || null;
-    prev.error = raw.error || null;
+    prev.error = confirmed === 'down' ? raw.error || null : null;
     prev.ms = raw.ms;
     state.monitors[mon.id] = prev;
 
-    // Persist per-monitor data
     const file = path.join(DATA, `${mon.id}.json`);
     const data = loadJson(file, emptyMonitorData(mon));
     data.name = mon.name;
@@ -537,11 +628,17 @@ async function main() {
     data.link = mon.link || null;
     data.kind = mon.kind;
 
-    // Sample: use confirmed status for history (unknown samples skipped for uptime)
+    // Sample: maintenance → up:null (excluded from uptime); downtime → false; up → true
+    let sampleUp = null;
+    if (confirmed === 'up') sampleUp = true;
+    else if (confirmed === 'down') sampleUp = false;
+    else sampleUp = null; // restart/stopped/unknown
+
     const sample = {
       t: now,
-      up: confirmed === 'unknown' ? null : confirmed === 'up',
+      up: sampleUp,
       ms: typeof raw.ms === 'number' ? raw.ms : null,
+      derived: confirmedDerived,
     };
     if (raw.extra) {
       if (raw.extra.players != null) sample.p = raw.extra.players;
@@ -549,16 +646,13 @@ async function main() {
       if (raw.extra.map) sample.map = String(raw.extra.map).slice(0, 40);
     }
     data.samples.push(sample);
-    const cutoff = now - RAW_KEEP_MS;
-    data.samples = data.samples.filter((s) => s.t >= cutoff);
+    data.samples = data.samples.filter((s) => s.t >= now - RAW_KEEP_MS);
 
-    // Daily aggregate only counts confirmed up/down
-    if (confirmed === 'up' || confirmed === 'down') {
-      upsertDay(data.days, today, confirmed === 'up', raw.ms);
-      pruneDays(data.days);
-    }
+    if (confirmed === 'up') upsertDay(data.days, today, 'up', raw.ms);
+    else if (confirmed === 'down') upsertDay(data.days, today, 'down', raw.ms);
+    else if (confirmed === 'restart' || confirmed === 'stopped') upsertDay(data.days, today, 'maint', raw.ms);
+    pruneDays(data.days);
 
-    // Compute uptimes for this monitor
     const samples24 = data.samples.filter((s) => s.t >= now - 24 * 3600_000);
     const uptime24h = calcUptime(samples24, 'samples');
     const days7 = data.days.slice(-7);
@@ -568,21 +662,25 @@ async function main() {
     const uptime30d = calcUptime(days30, 'days');
     const uptime90d = calcUptime(days90, 'days');
 
-    // Daily bar data for UI
     const dayBars = days90.map((d) => {
-      const tot = (d.up || 0) + (d.down || 0);
+      const tot = (d.up || 0) + (d.down || 0); // maint excluded from %
       const pct = tot ? Math.round(((d.up || 0) / tot) * 10000) / 100 : null;
       return {
         d: d.d,
         pct,
         up: d.up || 0,
         down: d.down || 0,
+        maint: d.maint || 0,
         avgMs: d.nMs ? Math.round(d.sumMs / d.nMs) : null,
       };
     });
 
     data.meta = {
       status: confirmed,
+      derived: confirmedDerived,
+      cause,
+      pteroPower: pteroPower !== 'unknown' ? pteroPower : null,
+      pteroSource,
       ms: raw.ms,
       extra: raw.extra || null,
       error: confirmed === 'down' ? raw.error || null : null,
@@ -591,7 +689,6 @@ async function main() {
       updatedAt: now,
     };
     data.dayBars = dayBars;
-
     saveJson(file, data);
 
     results.push({
@@ -601,6 +698,9 @@ async function main() {
       kind: mon.kind,
       link: mon.link || null,
       status: confirmed,
+      derived: confirmedDerived,
+      cause,
+      pteroPower: pteroPower !== 'unknown' ? pteroPower : null,
       ms: raw.ms,
       extra: raw.extra || null,
       error: confirmed === 'down' ? raw.error || null : null,
@@ -609,25 +709,31 @@ async function main() {
     });
 
     console.log(
-      `[check] ${mon.id}: ${confirmed}` +
+      `[check] ${mon.id}: ${confirmedDerived}` +
+        (pteroPower !== 'unknown' ? ` ptero=${pteroPower}/${pteroSource}` : '') +
         (raw.ms != null ? ` ${raw.ms}ms` : '') +
         (raw.extra?.map ? ` map=${raw.extra.map}` : '') +
         (raw.extra?.players != null ? ` ${raw.extra.players}/${raw.extra.max}` : '') +
-        (raw.unknown ? ' (unknown/widget)' : '') +
-        (raw.error && confirmed !== 'up' ? ` err=${raw.error}` : ''),
+        (raw.unknown ? ' (widget)' : '') +
+        (raw.error && confirmed === 'down' ? ` err=${raw.error}` : ''),
     );
   }
 
-  // Overall
   const countable = results.filter((r) => r.status !== 'unknown');
   const downCount = countable.filter((r) => r.status === 'down').length;
+  const maintCount = countable.filter((r) => r.status === 'restart' || r.status === 'stopped').length;
   const upCount = countable.filter((r) => r.status === 'up').length;
   let overall = 'ok';
   let overallLabel = 'Alle Systeme betriebsbereit';
-  if (downCount === 0 && upCount > 0) {
+  if (downCount === 0 && maintCount === 0 && upCount > 0) {
     overall = 'ok';
     overallLabel = 'Alle Systeme betriebsbereit';
-  } else if (downCount > 0 && upCount > 0) {
+  } else if (downCount === 0 && maintCount > 0) {
+    overall = 'partial';
+    overallLabel = maintCount && results.some((r) => r.derived === 'restart')
+      ? 'Neustart / Wartung'
+      : 'Wartung';
+  } else if (downCount > 0 && (upCount > 0 || maintCount > 0)) {
     overall = 'partial';
     overallLabel = 'Teilweise Störung';
   } else if (downCount > 0 && upCount === 0) {
@@ -638,7 +744,6 @@ async function main() {
     overallLabel = 'Status unbekannt';
   }
 
-  // Keep last 50 incidents
   state.incidents = state.incidents.slice(0, 50);
   const incidentsPublic = state.incidents.slice(0, 10).map((i) => ({
     id: i.id,
@@ -647,6 +752,8 @@ async function main() {
     start: i.start,
     end: i.end,
     status: i.status,
+    cause: i.cause || null,
+    derived: i.derived || null,
     durationMs: i.end ? i.end - i.start : now - i.start,
     duration: i.duration || formatDurationDe(i.end ? i.end - i.start : now - i.start),
   }));
@@ -657,7 +764,8 @@ async function main() {
     overallLabel,
     monitors: results,
     incidents: incidentsPublic,
-    note: 'GitHub Actions Cron ist best-effort (manchmal 5–15 Min Verspätung).',
+    note:
+      'GitHub Actions Cron ist best-effort (manchmal 5–15 Min Verspätung). Gestoppt/Neustart zählen als Wartung, nicht als Downtime. Crash-Heuristik: running→offline ohne stopping.',
   };
   saveJson(path.join(DATA, 'summary.json'), summary);
   saveJson(STATE_FILE, state);

@@ -5,6 +5,17 @@
     up: 'Online',
     down: 'Offline',
     unknown: 'Unbekannt',
+    restart: 'Neustart',
+    stopped: 'Gestoppt',
+  };
+
+  const DERIVED_LABEL = {
+    online: 'Online',
+    restart: 'Neustart',
+    stopped: 'Gestoppt',
+    disconnected: 'Verbindung getrennt',
+    crashed: 'Abgestürzt',
+    unknown: 'Unbekannt',
   };
 
   const UPTIME_KEYS = [
@@ -106,10 +117,16 @@
     }
   }
 
-  function barClass(pct) {
-    if (pct == null) return 'bar--empty';
-    if (pct >= 99) return 'bar--ok';
-    if (pct >= 95) return 'bar--warn';
+  function barClass(d) {
+    if (!d || (d.pct == null && !(d.maint > 0))) return 'bar--empty';
+    // Day dominated by maintenance
+    const checks = (d.up || 0) + (d.down || 0) + (d.maint || 0);
+    if (checks && (d.maint || 0) >= (d.up || 0) + (d.down || 0) && (d.down || 0) === 0) {
+      return 'bar--maint';
+    }
+    if (d.pct == null) return d.maint ? 'bar--maint' : 'bar--empty';
+    if (d.pct >= 99) return 'bar--ok';
+    if (d.pct >= 95) return 'bar--warn';
     return 'bar--bad';
   }
 
@@ -219,16 +236,21 @@
 
     for (const d of padded) {
       const el = document.createElement('div');
-      el.className = `bar ${barClass(d.pct)}`;
+      el.className = `bar ${barClass(d)}`;
       const downtimeMin = Math.round((d.down || 0) * 5);
+      const maintMin = Math.round((d.maint || 0) * 5);
       const statusLabel =
-        d.pct == null
+        d.pct == null && !(d.maint > 0)
           ? 'Keine Daten'
-          : d.pct >= 99
-            ? 'Betriebsbereit'
-            : d.pct >= 95
-              ? 'Störung'
-              : 'Ausfall';
+          : (d.maint || 0) > 0 && (d.down || 0) === 0 && (d.up || 0) === 0
+            ? 'Wartung'
+            : d.pct == null
+              ? 'Wartung / keine Uptime-Daten'
+              : d.pct >= 99
+                ? 'Betriebsbereit'
+                : d.pct >= 95
+                  ? 'Störung'
+                  : 'Ausfall';
       el.addEventListener('mouseenter', (e) => {
         showTip(
           e,
@@ -240,6 +262,9 @@
               : d.pct != null
                 ? '<br>Kein Ausfall'
                 : '') +
+            (d.maint
+              ? `<br>Wartung ≈ ${maintMin} Min (${d.maint} Checks)`
+              : '') +
             (d.avgMs != null ? `<br>Ø Antwort: ${fmtMs(d.avgMs)}` : ''),
         );
       });
@@ -260,6 +285,7 @@
       '<span><i class="leg-ok"></i>Betriebsbereit</span>' +
       '<span><i class="leg-warn"></i>Störung</span>' +
       '<span><i class="leg-bad"></i>Ausfall</span>' +
+      '<span><i class="leg-maint"></i>Wartung</span>' +
       '<span><i class="leg-empty"></i>Keine Daten</span>';
     wrap.appendChild(legend);
 
@@ -333,11 +359,24 @@
     card.dataset.id = mon.id;
 
     const status = mon.status || 'unknown';
+    const derived = mon.derived || null;
+    const pillClass =
+      status === 'restart' || status === 'stopped'
+        ? status
+        : status === 'down' && derived === 'crashed'
+          ? 'down'
+          : status === 'down'
+            ? 'down'
+            : status === 'up'
+              ? 'up'
+              : status;
+    const pillText =
+      (derived && DERIVED_LABEL[derived]) || STATUS_LABEL[status] || status;
     const head = document.createElement('div');
     head.className = 'card__head';
     head.innerHTML = `
       <h3 class="card__title"><span class="icon">${mon.icon || ''}</span> ${escapeHtml(mon.name)}</h3>
-      <span class="pill pill--${status}">${STATUS_LABEL[status] || status}</span>`;
+      <span class="pill pill--${pillClass}">${escapeHtml(pillText)}</span>`;
     card.appendChild(head);
 
     const uptime = (detail && detail.meta && detail.meta.uptime) || mon.uptime || {};
@@ -420,12 +459,13 @@
     for (const i of list) {
       const li = document.createElement('li');
       const ongoing = i.status === 'ongoing';
+      const cause = i.cause ? ` · ${escapeHtml(i.cause)}` : '';
       li.innerHTML =
         `<strong>${escapeHtml(i.monitorName)}</strong>` +
         (ongoing ? '<span class="badge-ongoing">laufend</span>' : '') +
         `<br><span style="color:var(--muted)">${fmtDateDe(i.start)}` +
         (i.end ? ` – ${fmtDateDe(i.end)}` : ' – jetzt') +
-        ` · ${escapeHtml(i.duration || '')}</span>`;
+        ` · ${escapeHtml(i.duration || '')}${cause}</span>`;
       ul.appendChild(li);
     }
   }

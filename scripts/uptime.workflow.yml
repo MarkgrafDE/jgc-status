@@ -28,6 +28,10 @@ jobs:
       - name: Run monitors
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PTERO_URL: ${{ secrets.PTERO_URL }}
+          PTERO_CLIENT_KEY: ${{ secrets.PTERO_CLIENT_KEY }}
+          PTERO_GAME_SERVER_ID: ${{ secrets.PTERO_GAME_SERVER_ID }}
+          PTERO_BOT_SERVER_ID: ${{ secrets.PTERO_BOT_SERVER_ID }}
         run: node scripts/check.mjs
 
       - name: Commit & push data
