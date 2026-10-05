@@ -8,3 +8,17 @@
 - **Alerts:** Discord-Webhook bei Statuswechsel (Down erst nach 2 Fehlversuchen)
 
 Keine Serverkosten — nur dieses öffentliche Repo + GitHub Pages + Actions.
+
+## Workflow aktivieren (einmalig)
+
+Der OAuth-Token auf der Agent-Box hat kein `workflow`-Scope. Bitte einmalig:
+
+```bash
+gh auth refresh -h github.com -s repo,workflow,read:org,gist
+cd /workspace/jgc-status
+git push origin main   # pusht .github/workflows/uptime.yml
+gh workflow run uptime.yml --repo MarkgrafDE/jgc-status
+```
+
+Oder im GitHub-Web-UI: Datei `scripts/uptime.workflow.yml` nach `.github/workflows/uptime.yml` kopieren („Add file“).
+
