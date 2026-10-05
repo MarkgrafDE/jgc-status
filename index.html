@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Just Gaming Community — öffentliche Statusseite" />
+  <meta name="theme-color" content="#0b0b12" />
+  <title>JGC Status</title>
+  <link rel="icon" type="image/png" href="assets/logo.png" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <div class="bg-glow" aria-hidden="true"></div>
+  <header class="site-header">
+    <div class="brand">
+      <img src="assets/logo.png" alt="JGC Logo" class="logo" width="56" height="56" />
+      <div>
+        <h1>JGC Status</h1>
+        <p class="subtitle">Just Gaming Community</p>
+      </div>
+    </div>
+    <div id="last-checked" class="last-checked">Lade…</div>
+  </header>
+
+  <main>
+    <section id="overall" class="overall overall--loading" role="status">
+      <span class="overall__dot"></span>
+      <span class="overall__label">Status wird geladen…</span>
+    </section>
+
+    <section id="monitors" class="monitors" aria-live="polite"></section>
+
+    <section class="incidents">
+      <h2>Störungshistorie</h2>
+      <ul id="incidents-list" class="incidents-list">
+        <li class="muted">Lade…</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      Daten alle ~5&nbsp;Min. via GitHub Actions (Cron best-effort, manchmal 5–15&nbsp;Min Verspätung).
+      Seite aktualisiert sich alle 60&nbsp;s.
+    </p>
+    <p>
+      <a href="https://github.com/MarkgrafDE/jgc-status" rel="noopener">Quellcode</a>
+      ·
+      <a href="https://www.justgamingcommunity.de" rel="noopener">justgamingcommunity.de</a>
+    </p>
+  </footer>
+
+  <script src="assets/app.js" defer></script>
+</body>
+</html>
