@@ -1,5 +1,7 @@
 name: Uptime Check
 
+# Primary cadence: in-job loop (~every 5 min for ~50 min) + self-chain at the end.
+# schedule */5 is only a soft backup — GitHub free-tier often delays or skips it.
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -7,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: uptime-check
@@ -15,17 +18,24 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 58
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Run monitors
+      - name: Configure git
+        run: |
+          git config user.name "jgc-status[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Monitor loop (~50 min, every 5 min)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PTERO_URL: ${{ secrets.PTERO_URL }}
@@ -33,16 +43,57 @@ jobs:
           PTERO_MAIN_SERVER_ID: ${{ secrets.PTERO_MAIN_SERVER_ID }}
           PTERO_GAME_SERVER_ID: ${{ secrets.PTERO_GAME_SERVER_ID }}
           PTERO_BOT_SERVER_ID: ${{ secrets.PTERO_BOT_SERVER_ID }}
-        run: node scripts/check.mjs
-
-      - name: Commit & push data
         run: |
-          git config user.name "jgc-status[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/
-          if git diff --cached --quiet; then
-            echo "No data changes"
+          set -euo pipefail
+          LOOP_SECONDS=$((50 * 60))
+          INTERVAL=300
+          START=$SECONDS
+          iter=0
+          while true; do
+            iter=$((iter + 1))
+            echo "=== iteration ${iter} $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+
+            git fetch origin main
+            if ! git pull --rebase origin main; then
+              echo "rebase conflict — abort and retry once"
+              git rebase --abort || true
+              git pull --rebase origin main
+            fi
+
+            node scripts/check.mjs
+
+            git add data/
+            if git diff --cached --quiet; then
+              echo "No data changes"
+            else
+              git commit -m "chore: update status data [skip ci]"
+              git pull --rebase origin main
+              git push origin HEAD:main
+              echo "Pushed data commit"
+            fi
+
+            elapsed=$((SECONDS - START))
+            remaining=$((LOOP_SECONDS - elapsed))
+            if [ "$remaining" -lt "$INTERVAL" ]; then
+              echo "Loop finished after ${iter} iteration(s), ${elapsed}s elapsed"
+              break
+            fi
+            echo "Sleeping ${INTERVAL}s (remaining budget ~${remaining}s)"
+            sleep "$INTERVAL"
+          done
+
+      - name: Chain next workflow run
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Avoid pile-up: if schedule (or a prior chain) already queued/started another run, do not chain.
+          others=$(gh run list --workflow uptime.yml --limit 20 --json databaseId,status \
+            --jq "[.[] | select(.status==\"in_progress\" or .status==\"queued\") | select(.databaseId != ${{ github.run_id }})] | length")
+          if [ "${others:-0}" != "0" ]; then
+            echo "Skip chain: ${others} other run(s) already in_progress/queued"
             exit 0
           fi
-          git commit -m "chore: update status data [skip ci]"
-          git push
+          gh workflow run uptime.yml
+          echo "Chained next uptime.yml run"

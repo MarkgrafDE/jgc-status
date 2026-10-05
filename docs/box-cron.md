@@ -1,10 +1,11 @@
-# Interim Box-Cron (Messungen)
+# Box cron — retired
 
-Solange der GitHub-Actions-Workflow nicht gepusht werden kann (OAuth ohne `workflow`-Scope), läuft der Checker alle 5 Min auf der Agent-Box:
+The agent box is **no longer** used for JGC status checks or workflow triggers.
 
-- Script: `/workspace/jgc-status-cron/run-check.sh`
-- Clone: `/workspace/jgc-status-cron` (tracked `origin/main`, **ohne** lokales Workflow-Commit)
-- Log: `/workspace/jgc-status-cron.log`
-- Crontab: `2-59/5 * * * *` (Minute 2,7,12,…)
+- **Do not** re-enable crontab entries for `/workspace/jgc-status-cron/` (neither `run-check.sh` nor `trigger-workflow.sh`).
+- Monitoring is **GitHub-only**: `.github/workflows/uptime.yml`
+  - Soft backup schedule: `*/5 * * * *` (GitHub often delays/skips free-tier cron)
+  - Primary cadence: the job loops the checker every ~5 minutes for ~50 minutes, commits/pushes `data/` each iteration (`git pull --rebase` before push), then chains the next run with `gh workflow run uptime.yml` (`actions: write`)
+  - Concurrency group `uptime-check` with `cancel-in-progress: false`; chain step skips if another run is already `queued`/`in_progress`
 
-**Sobald der Workflow live ist:** Box-Cron deaktivieren (`crontab -l | grep -v jgc-status-cron | crontab -`), sonst doppelte Checks/Alerts.
+Legacy clone/scripts under `/workspace/jgc-status-cron` may still exist on the box but are inactive.
