@@ -1,0 +1,43 @@
+name: Uptime Check
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uptime-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run monitors
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: node scripts/check.mjs
+
+      - name: Commit & push data
+        run: |
+          git config user.name "jgc-status[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No data changes"
+            exit 0
+          fi
+          git commit -m "chore: update status data [skip ci]"
+          git push
