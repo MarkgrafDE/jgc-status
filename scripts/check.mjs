@@ -28,12 +28,22 @@ const FAIL_CONFIRM = 2; // consecutive fails before DOWN
 const MONITORS = [
   {
     id: 'gameserver',
-    name: "Gameserver Garry's Mod",
+    name: "Gameserver MRP",
+    kind: 'a2s',
+    host: '159.195.60.189',
+    port: 27015,
+    icon: '🎮',
+    link: 'https://markgrafde.github.io/jgc-connect/?ip=159.195.60.189:27015',
+    pteroEnv: 'PTERO_MAIN_SERVER_ID',
+  },
+  {
+    id: 'testserver',
+    name: "Gameserver Testserver",
     kind: 'a2s',
     host: '159.195.60.189',
     port: 27016,
-    icon: '🎮',
-    link: 'https://markgrafde.github.io/jgc-connect/',
+    icon: '🧪',
+    link: 'https://markgrafde.github.io/jgc-connect/?ip=159.195.60.189:27016',
     pteroEnv: 'PTERO_GAME_SERVER_ID',
   },
   {
